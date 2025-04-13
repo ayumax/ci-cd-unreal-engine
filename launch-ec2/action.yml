@@ -1,0 +1,151 @@
+name: 'Launch EC2 Instance'
+description: 'Launch EC2 spot instance for Unreal Engine testing'
+inputs:
+  repo-name:
+    description: 'GitHub repository name in format owner/repo'
+    required: true
+  pr-number:
+    description: 'Pull request number'
+    required: true
+  ue-version:
+    description: 'Unreal Engine version to use for testing (e.g. 5.3, 5.4, 5.5)'
+    required: false
+    default: '5.5'
+  base-branch:
+    description: 'Base branch of the pull request (for auto UE version detection)'
+    required: false
+  aws-region:
+    description: 'AWS region to run tests in'
+    required: false
+    default: 'ap-northeast-1'
+  role-to-assume:
+    description: 'ARN of AWS IAM role to assume via OIDC'
+    required: true
+
+outputs:
+  instance-id:
+    description: 'EC2 instance ID where tests are running'
+    value: ${{ steps.launch-ec2.outputs.instance_id }}
+  instance-ip:
+    description: 'Public IP address of the EC2 instance'
+    value: ${{ steps.launch-ec2.outputs.instance_ip }}
+  used-ue-version:
+    description: 'Unreal Engine version used for testing'
+    value: ${{ steps.determine-version.outputs.version }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Determine Unreal Engine version
+      id: determine-version
+      shell: bash
+      run: |
+        # Determine UE version based on base-branch if not explicitly specified
+        if [[ -z "${{ inputs.ue-version }}" || "${{ inputs.ue-version }}" == "5.5" ]]; then
+          BASE_BRANCH="${{ inputs.base-branch }}"
+          
+          if [[ "$BASE_BRANCH" == "UE5.5" ]]; then
+            UE_VERSION="5.5"
+          elif [[ "$BASE_BRANCH" == "UE5.4" ]]; then
+            UE_VERSION="5.4"
+          elif [[ "$BASE_BRANCH" == "UE5.3" ]]; then
+            UE_VERSION="5.3"
+          elif [[ "$BASE_BRANCH" == "main" || "$BASE_BRANCH" == "master" ]]; then
+            UE_VERSION="5.5"
+          else
+            # Default to 5.5
+            UE_VERSION="5.5"
+          fi
+        else
+          # Use explicitly specified version
+          UE_VERSION="${{ inputs.ue-version }}"
+        fi
+        
+        echo "version=$UE_VERSION" >> $GITHUB_OUTPUT
+        echo "Using Unreal Engine version: $UE_VERSION"
+
+    - name: Checkout action repository
+      uses: actions/checkout@v3
+      with:
+        repository: 'ayumax/ci-cd-unreal-engine'
+        path: 'ci-cd-unreal-engine'
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: ${{ inputs.role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: UnrealPluginTest-${{ inputs.pr-number }}
+      
+    - name: Launch EC2 instance
+      id: launch-ec2
+      shell: bash
+      continue-on-error: true
+      run: |
+        chmod +x ${{ github.action_path }}/scripts/launch-ec2.sh
+        ${{ github.action_path }}/scripts/launch-ec2.sh \
+          "${{ inputs.repo-name }}" \
+          "${{ inputs.pr-number }}" \
+          "${{ steps.determine-version.outputs.version }}"
+          
+        echo "EC2 instance launched successfully"
+
+    - name: Upload EC2 instance info
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ec2-info
+        path: ec2-info.txt
+        retention-days: 1
+        if-no-files-found: ignore
+        
+    - name: Wait for instance to be ready
+      shell: bash
+      run: |
+        echo "Waiting for instance to be ready..."
+        aws ec2 wait instance-status-ok --instance-ids ${{ steps.launch-ec2.outputs.instance_id }}
+        echo "Instance is ready, checking GitHub Actions Runner status..."
+        
+        # Get GitHub PAT from Parameter Store
+        GITHUB_PAT=$(aws ssm get-parameter --name "/unreal-cicd/github-pat" --with-decryption --query "Parameter.Value" --output text)
+        
+        # Extract repository owner and name
+        REPO_OWNER=$(echo "${{ inputs.repo-name }}" | cut -d '/' -f1)
+        REPO_NAME=$(echo "${{ inputs.repo-name }}" | cut -d '/' -f2)
+        
+        # Build runner name
+        RUNNER_NAME="unreal-ci-pr-${{ inputs.pr-number }}"
+        
+        # Check Runner status (simple retry logic)
+        MAX_ATTEMPTS=3
+        ATTEMPT=1
+        RUNNER_READY=false
+        
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          echo "Checking GitHub Actions Runner status (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+          
+          # Check runner status via GitHub API
+          RUNNER_STATUS=$(curl -s -X GET \
+            -H "Authorization: token $GITHUB_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/runners" | \
+            jq -r --arg name "$RUNNER_NAME" '.runners[] | select(.name == $name) | .status')
+          
+          if [[ "$RUNNER_STATUS" == "online" ]]; then
+            echo "GitHub Actions Runner is online"
+            RUNNER_READY=true
+            break
+          fi
+          
+          if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+            echo "GitHub Actions Runner not ready yet, waiting 10 seconds..."
+            sleep 10
+          fi
+          
+          ATTEMPT=$((ATTEMPT+1))
+        done
+        
+        # Continue even if runner is not ready, but log a warning
+        if [ "$RUNNER_READY" != true ]; then
+          echo "Warning: GitHub Actions Runner may not be ready, but continuing..."
+        fi 

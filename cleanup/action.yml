@@ -1,0 +1,94 @@
+name: 'Cleanup EC2 Resources'
+description: 'Cleanup EC2 instances and GitHub Actions runners'
+inputs:
+  repo-name:
+    description: 'GitHub repository name in format owner/repo'
+    required: true
+  pr-number:
+    description: 'Pull request number'
+    required: true
+  aws-region:
+    description: 'AWS region where the instance is running'
+    required: false
+    default: 'ap-northeast-1'
+  role-to-assume:
+    description: 'ARN of AWS IAM role to assume via OIDC'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout action repository
+      uses: actions/checkout@v3
+      with:
+        repository: 'ayumax/ci-cd-unreal-engine'
+        path: 'ci-cd-unreal-engine'
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: ${{ inputs.role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: UnrealPluginTest-${{ inputs.pr-number }}
+
+    - name: Download EC2 instance info
+      uses: actions/download-artifact@v4
+      with:
+        name: ec2-info
+        path: .
+
+    - name: Read EC2 instance info
+      id: ec2-info
+      shell: bash
+      run: |
+        if [ -f ec2-info.txt ]; then
+          source ec2-info.txt
+          echo "instance_id=${instance_id}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Terminate EC2 instance
+      shell: bash
+      run: |
+        if [[ -n "${{ steps.ec2-info.outputs.instance_id }}" ]]; then
+          echo "Starting instance termination process..."
+          chmod +x ${{ github.action_path }}/scripts/terminate-spot-instance.sh
+          ${{ github.action_path }}/scripts/terminate-spot-instance.sh "${{ steps.ec2-info.outputs.instance_id }}"
+        else
+          echo "No instance ID found in artifact, skipping termination"
+        fi
+
+    - name: Remove GitHub Runner
+      shell: bash
+      run: |
+        # Get GitHub PAT from Parameter Store
+        GITHUB_PAT=$(aws ssm get-parameter --name "/unreal-cicd/github-pat" --with-decryption --query "Parameter.Value" --output text)
+        
+        # Extract repository owner and name
+        REPO_OWNER=$(echo "${{ inputs.repo-name }}" | cut -d '/' -f1)
+        REPO_NAME=$(echo "${{ inputs.repo-name }}" | cut -d '/' -f2)
+        
+        # Build runner name
+        RUNNER_NAME="unreal-ci-pr-${{ inputs.pr-number }}"
+        
+        echo "Removing GitHub Runner: $RUNNER_NAME"
+        
+        # Find existing runner
+        RUNNER_ID=$(curl -s -X GET \
+          -H "Authorization: token $GITHUB_PAT" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/runners" | \
+          jq -r --arg name "$RUNNER_NAME" '.runners[] | select(.name == $name) | .id')
+        
+        if [[ -n "$RUNNER_ID" ]]; then
+          echo "Found existing runner, removing..."
+          
+          # Remove runner
+          curl -s -X DELETE \
+            -H "Authorization: token $GITHUB_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/runners/$RUNNER_ID"
+          
+          echo "Successfully removed runner"
+        else
+          echo "No runner found with name: $RUNNER_NAME"
+        fi 

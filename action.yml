@@ -1,0 +1,79 @@
+name: 'Unreal Engine Plugin Test'
+description: 'Run Unreal Engine plugin tests using EC2 spot instances'
+inputs:
+  mode:
+    description: 'Operation mode (launch, test, or cleanup)'
+    required: true
+    default: 'launch'
+  repo-name:
+    description: 'GitHub repository name in format owner/repo'
+    required: true
+  pr-number:
+    description: 'Pull request number'
+    required: true
+  plugin-name:
+    description: 'Name of the Unreal Engine plugin to test'
+    required: false
+    default: 'ObjectDeliverer'
+  project-name:
+    description: 'Name of the Unreal Engine project (defaults to plugin-name + Test)'
+    required: false
+  ue-version:
+    description: 'Unreal Engine version to use for testing (e.g. 5.3, 5.4, 5.5)'
+    required: false
+    default: '5.5'
+  base-branch:
+    description: 'Base branch of the pull request (for auto UE version detection)'
+    required: false
+  aws-region:
+    description: 'AWS region to run tests in'
+    required: false
+    default: 'ap-northeast-1'
+  role-to-assume:
+    description: 'ARN of AWS IAM role to assume via OIDC'
+    required: true
+  instance-id:
+    description: 'EC2 instance ID to terminate (required for cleanup mode)'
+    required: false
+  repository:
+    description: 'GitHub repository to checkout in test mode'
+    required: false
+  ref:
+    description: 'Git reference to checkout in test mode'
+    required: false
+  token:
+    description: 'GitHub token for repository access in test mode'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Launch EC2 Instance
+      if: ${{ inputs.mode == 'launch' }}
+      uses: ayumax/ci-cd-unreal-engine/launch-ec2@main
+      with:
+        repo-name: ${{ inputs.repo-name }}
+        pr-number: ${{ inputs.pr-number }}
+        ue-version: ${{ inputs.ue-version }}
+        base-branch: ${{ inputs.base-branch }}
+        aws-region: ${{ inputs.aws-region }}
+        role-to-assume: ${{ inputs.role-to-assume }}
+
+    - name: Run Tests
+      if: ${{ inputs.mode == 'test' }}
+      uses: ayumax/ci-cd-unreal-engine/run-tests@main
+      with:
+        plugin-name: ${{ inputs.plugin-name }}
+        project-name: ${{ inputs.project-name }}
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+
+    - name: Cleanup Resources
+      if: ${{ inputs.mode == 'cleanup' }}
+      uses: ayumax/ci-cd-unreal-engine/cleanup@main
+      with:
+        repo-name: ${{ inputs.repo-name }}
+        pr-number: ${{ inputs.pr-number }}
+        aws-region: ${{ inputs.aws-region }}
+        role-to-assume: ${{ inputs.role-to-assume }} 

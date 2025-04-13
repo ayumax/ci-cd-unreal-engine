@@ -1,0 +1,80 @@
+name: 'Run Unreal Engine Tests'
+description: 'Run Unreal Engine plugin tests on EC2 instance'
+inputs:
+  plugin-name:
+    description: 'Name of the Unreal Engine plugin to test'
+    required: true
+    default: 'ObjectDeliverer'
+  project-name:
+    description: 'Name of the Unreal Engine project (defaults to plugin-name + Test)'
+    required: false
+  repository:
+    description: 'GitHub repository name in format owner/repo'
+    required: false
+  ref:
+    description: 'Git reference to checkout'
+    required: false
+  token:
+    description: 'GitHub token for repository access'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      if: ${{ inputs.repository != '' }}
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        path: source
+
+    - name: Run tests
+      shell: bash
+      run: |
+        # Set bucket name and script paths
+        BUCKET_NAME="unreal-cicd-terraform-config"
+        RUN_TESTS_PATH="run-tests.sh"
+        RUN_PLUGIN_TEST_PATH="run_plugin_test.sh"
+        
+        # Download test runner scripts
+        aws s3 cp "s3://${BUCKET_NAME}/scripts/${RUN_TESTS_PATH}" "./source/${RUN_TESTS_PATH}"
+        if [ $? -eq 0 ]; then
+          echo "Successfully downloaded run-tests.sh"
+          chmod +x "./source/${RUN_TESTS_PATH}"
+        else
+          echo "Error: Failed to download run-tests.sh"
+          exit 1
+        fi
+        
+        # Download plugin test script
+        aws s3 cp "s3://${BUCKET_NAME}/scripts/${RUN_PLUGIN_TEST_PATH}" "./source/${RUN_PLUGIN_TEST_PATH}"
+        if [ $? -eq 0 ]; then
+          echo "Successfully downloaded run_plugin_test.sh"
+          chmod +x "./source/${RUN_PLUGIN_TEST_PATH}"
+        else
+          echo "Error: Failed to download run_plugin_test.sh"
+          exit 1
+        fi
+
+        cd source
+        
+        # Run tests
+        echo "Running tests..."
+        ./${RUN_TESTS_PATH} "${{ inputs.plugin-name }}" "${{ inputs.project-name }}" 
+
+        # Check test results
+        if [ $? -eq 0 ]; then
+          echo "Tests completed successfully"
+        else
+          echo "Error: Test execution failed"
+          exit 1
+        fi
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: unreal-test-results
+        path: source/TestResults/
+        retention-days: 7 
