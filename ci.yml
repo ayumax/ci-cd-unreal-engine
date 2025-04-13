@@ -1,0 +1,45 @@
+name: 'Unreal Plugin Test'
+description: 'Run tests for Unreal Engine plugins'
+inputs:
+  plugin_name:
+    description: 'Name of the Unreal Engine plugin to test'
+    required: true
+  project_name:
+    description: 'Name of the Unreal project file (without .uproject extension)'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set project name
+      shell: bash
+      run: echo "PROJECT_NAME=${{ inputs.project_name || format('{0}Test', inputs.plugin_name) }}" >> $GITHUB_ENV
+    
+    - name: Test Plugin with Unreal Engine
+      shell: bash
+      env:
+        PLUGIN_NAME: ${{ inputs.plugin_name }}
+      run: |
+        docker run --rm \
+          -v ${{ github.workspace }}:/project \
+          -e PLUGIN_NAME=$PLUGIN_NAME \
+          -e PROJECT_NAME=$PROJECT_NAME \
+          ghcr.io/epicgames/unreal-engine:local \
+          /bin/bash -c "cd /project && \
+          ${{ github.action_path }}/scripts/RunPluginTests.sh || exit 1"
+    
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          ./TestResults
+          ./Saved/Logs
+
+    - name: Self-terminate EC2 instance
+      if: always()
+      shell: bash
+      run: |
+          /opt/terminate-instance.sh
